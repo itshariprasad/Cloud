@@ -1,0 +1,647 @@
+Client.java
+
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.InputStreamReader;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.Socket;
+
+public class Client
+{
+	/*
+	 * creates a connection with server and sents the file to the server and waits for the result queue from SQS.
+	 * */
+	public static void main(String[] args)
+	{
+		try
+		{
+			Socket ss;
+	        ObjectOutputStream out;
+	        ObjectInputStream in;
+	        String fname,msg;
+	        
+	        BufferedReader br=new BufferedReader(new InputStreamReader(System.in));
+	        String hostname=args[0];
+	        int portno=Integer.parseInt(args[1]);
+	        ss = new Socket(hostname,portno);
+	        out = new ObjectOutputStream(ss.getOutputStream());
+	        in = new ObjectInputStream(ss.getInputStream());
+	       
+	        System.out.println("enter the job file name : ");
+	        fname = (String)br.readLine();
+	        int flag ;
+			
+	 	       
+	        BufferedReader br_file = new BufferedReader(new FileReader(fname));
+	        String line="" , data = "";
+	        line = br_file.readLine();
+	        while(line != null){
+	       			        data = data + "%" + line;
+	       			     line = br_file.readLine();
+	        }
+	        data = data +"%END";
+	        out.writeUTF(data);
+	        out.flush();
+	        
+	        System.out.println(data);
+	        System.out.println("File Sent");
+	        
+	        flag = in.read();
+	        
+	        if(flag == 1){
+			in.close();
+	        out.close();
+	        br.close();         
+	        ss.close();
+	        System.out.println("Ack received..");
+	        System.out.println("Client end");
+	        System.out.println("connection closed");
+	        }
+		} 
+		catch (Exception ex) 
+		{
+			System.out.println(ex);
+		}
+	}
+}
+
+
+Scheduler.java
+
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.HashMap;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+
+public class Scheduler 
+{
+	public static float start;
+	
+	@SuppressWarnings({ "unchecked", "rawtypes", "unused" })
+	public static void main(String[] args)
+	{ 
+		// wait for the connection from client and sents the task from the client file to SQS
+		//scheduler –s <PORT> -lw <NUM> -rw
+		
+		try 
+		{
+	        int i=1,cnt=1;
+	        int portno=Integer.parseInt(args[2]);
+	        String typeOfBackEndWorker =  args[3];
+ 	
+	        	//backend worker is a local worker
+	        	 int num  =  Integer.parseInt(args[4]);
+		        ServerSocket ss = new ServerSocket(portno);
+		        Socket connection = null;
+		        String job,fname;
+		        ObjectOutputStream out;
+		        ObjectInputStream in;
+		       while(true){
+
+			        System.out.println("Waiting for connection");
+			        connection = ss.accept();
+			        System.out.println("Connection received from " + connection.getInetAddress().getHostName());
+			   
+			        out = new ObjectOutputStream(connection.getOutputStream());
+			        in = new ObjectInputStream(connection.getInputStream());
+			        
+			        System.out.println("connected");
+			        Queue queues = new Queue();
+			        
+			        boolean flag1 = true;
+					job = (String)in.readUTF();
+			        System.out.println("job from Client is : " + job);
+			        String[] data = job.split("%");
+			  	    int j =0;
+			  	    while(!data[j].equals("END")){
+			  	        	HashMap<String, Integer> a = new HashMap<String, Integer>();
+			  	        	a.put(data[j], j);
+			  	        	queues.insert(a);
+			  	        	j++;
+			  	     }
+			  	    out.writeInt(1);
+			  	    out.flush();
+					System.out.println("File Recieved");
+			       
+			        System.out.println("Ack sent");
+
+			        if(typeOfBackEndWorker.equals("lw")){
+			        	//local workers
+				         start = System.currentTimeMillis();
+				        System.out.println(start);
+				        ThreadPoolService.init(num);
+				      Queue result =  LocalWorkers.ProcessTask(queues);
+				       result.display();
+				        
+			        }else{
+			        	queues.processElement();
+			        	start = System.currentTimeMillis();
+			        	int size = SimpleQueueServiceSample.ResultQueue();
+			        	if(size > 0)
+			        		System.out.println("Result Queue received "+size);
+			        
+			        	//remote worker
+			        	//String tasks = SimpleQueueServiceSample.show();
+			        	 /*tasks =  tasks.substring(1, tasks.length()-1);
+			             String[] que = tasks.split(",");
+			            
+			             start = System.currentTimeMillis();
+			            System.out.println(start);
+			           
+			            ThreadPoolService.init(32);
+			        	for(int k=0;k<que.length ; k++){
+			        		String key = que[k].split("=")[0];
+			        		int value = Integer.parseInt(que[k].split("=")[1]);
+			        			HashMap<String, Integer> task =  new HashMap<String, Integer>();
+			        			task.put(key, value);
+			            		ThreadPoolService.insertTasK(task);
+			        	}
+			        	ThreadPoolService.stop();*/
+			        }
+		       }
+	        
+		} 
+	    catch (Exception e) 
+	    {
+	        System.out.println(e);
+	    }
+		}
+}
+
+
+
+LocalWorkers.java
+
+import java.util.HashMap;
+
+
+public class LocalWorkers {
+	public static Queue ProcessTask(Queue queues) {
+		// call the thread pool service and send the Queue for execution of local workers.
+		
+    	while(!queues.isEmpty()){
+    			HashMap<String, Integer> task =  queues.deQueue();
+    			System.out.println("Task going into threadpool "+task);
+        		ThreadPoolService.insertTasKInLW(task);
+    	}
+    	ThreadPoolService.stop();
+    	return ThreadPoolService.resultQueue;
+   		}
+ 
+	
+	
+}
+
+
+RemoteWorkers.java
+
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+
+
+public class RemoteWorkers {
+	public static void ProcessTask(List<String> tasks) {
+		// TODO Auto-generated method stub
+		ThreadPoolService.init(5);
+
+        Scheduler.start = System.currentTimeMillis();
+        System.out.println(Scheduler.start);
+
+	       
+        Iterator<String> i = tasks.iterator();
+				while(i.hasNext()){
+					String d = i.next();
+					String task = d.substring(1,d.length()-1 );
+					String key = task.split("=")[0];
+					int value = Integer.parseInt(task.split("=")[1]);
+			   		System.out.println(key+ " : " + value);
+			   			HashMap<String, Integer> t =  new HashMap<String, Integer>();
+			   			t.put(key, value);
+			       		ThreadPoolService.insertTasK(t);
+				}
+			
+       ThreadPoolService.stop();
+   		}
+ 
+	public static void main(String args[]){
+		
+		/*
+		 * gets the task from SQS and adds it into a list and then send the list to the process task to start thread pooling
+		 * */
+		System.out.println("print");
+		int  nOfTaskToExecute = Integer.parseInt(args[0]);
+		List<String> tasks = new ArrayList<String>();
+		boolean flag = true;
+		 while (flag) {
+				String task = SimpleQueueServiceSample.executeRemoteWorkers(nOfTaskToExecute);
+		    	System.out.println(task);
+		    	if(!task.equals(""))
+		    		tasks.add(task);
+		    	else{
+		    		 if(!tasks.isEmpty()){
+		    			 flag = false;	
+		    			 ProcessTask(tasks);
+		    		 }
+		    		 else{
+		    			 System.out.println("trying after 2 min");
+						try {
+							Thread.currentThread().sleep(12000);
+						} catch (InterruptedException e) {
+							// TODO Auto-generated catch block
+							e.printStackTrace();
+						}
+		    		 }
+		    	}
+		 }
+	}
+}
+
+
+QueApp.java
+
+
+import java.io.*;
+import java.util.HashMap;
+import java.util.List;
+
+import com.amazonaws.auth.ClasspathPropertiesFileCredentialsProvider;
+import com.amazonaws.services.sqs.AmazonSQS;
+import com.amazonaws.services.sqs.AmazonSQSClient;
+import com.amazonaws.services.sqs.model.SendMessageRequest;
+class Node{
+    public HashMap<String, Integer> item;
+    public Node next;
+    public Node(HashMap<String, Integer> val){ 
+        item = val; 
+    }
+    public void displayNode(){ 
+        System.out.print("[" + item + "]"); 
+    }
+	public HashMap<String, Integer> getData() {
+		return item;
+	}
+}
+class LinkedList{
+    private Node start;
+    private Node end;
+    public LinkedList(){
+        start = null;
+        end = null;
+    }
+    public boolean isEmpty(){ 
+        return start==null; 
+    }
+    public void insertEnd(HashMap<String, Integer> val){
+    	//Insert node at the end of list
+        Node newNode = new Node(val);
+        if( isEmpty() )
+            start = newNode;
+        else
+            end.next = newNode;
+        end = newNode;
+    }
+    public HashMap<String, Integer> deQueue(){
+    	//delete the node from the beginning of the list
+        HashMap<String, Integer> temp = start.item;
+        if(start.next == null)
+            end = null;
+        start = start.next;
+        return temp;
+    }
+    public void displayList(){
+        Node current = start;
+        while(current != null)
+        {
+            current.displayNode();
+            current = current.next;
+        }
+        System.out.println("");
+    }
+	public void readandProcessElement(String Queuename) {
+		Node current = start;
+		AmazonSQS sqs = null;
+        while(current != null)
+        {
+           HashMap<String, Integer> data =  current.getData();
+            System.out.println("element "+data);
+            try {
+            	 sqs =SimpleQueueServiceSample.push(data,Queuename);
+            	 //creating workers
+            	
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+            current = current.next;
+        }
+        System.out.println();System.out.println();System.out.println();
+	}
+	public void pushIntoSQS() {
+		// TODO Auto-generated method stub
+		Node current = start;
+		AmazonSQS sqs = null;
+           HashMap<String, Integer> data =  current.getData();
+            System.out.println("element "+data);
+            try {
+            	 sqs =SimpleQueueServiceSample.push(data, "resultQueue");
+            	 //creating workers
+            	
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+           
+        
+	}
+}
+class Queue{
+    private LinkedList listObj;
+    public Queue(){
+        listObj = new LinkedList(); 
+    }
+    public boolean isEmpty(){ 
+        return listObj.isEmpty(); 
+    }
+    public void insert(HashMap<String, Integer> k){ 
+        listObj.insertEnd(k); 
+    }
+    public HashMap<String, Integer> deQueue(){ 
+        return listObj.deQueue(); 
+    }
+    public void display(){
+        System.out.print("Queue [FIFO]: ");
+        listObj.displayList();
+    }
+	public void processElement() {
+		listObj.readandProcessElement("taskQueue");
+	}
+	public void pushIntoSQS() {
+		// TODO Auto-generated method stub
+		listObj.pushIntoSQS();
+	}
+}
+class QueApp{
+	public static long start;
+	public static Queue result = new Queue();
+    public static void main(String[] args){ 
+        Queue demo = new Queue();
+        int i = 1;
+        System.out.println("Inserting  elements in the queue");
+        HashMap<String, Integer> a = new HashMap<String, Integer>();
+        a.put("sleep 1000", i);
+        i++;
+        demo.insert(a);
+        a.put("sleep 200", i);
+        i++;
+        demo.insert(a);
+        a.put("sleep 300", i);
+        i++;
+        demo.insert(a);
+        a.put("sleep 600", i);
+        i++;
+        demo.insert(a);
+        a.put("sleep 1300", i);
+        i++;
+        demo.insert(a);
+                
+        demo.display();
+        
+        System.out.println("Reading each element for processing");
+     
+        //For remote workers
+       demo.processElement();
+        String tasks = SimpleQueueServiceSample.show();
+       tasks =  tasks.substring(1, tasks.length()-1);
+        System.out.println(tasks.split(",")[4]);
+        //For local server
+        /*start = System.currentTimeMillis();
+        System.out.println(start);
+    	while(!demo.isEmpty()){
+    			HashMap<String, Integer> task =  demo.deQueue();
+        		ThreadPoolService.insertTasK(task);
+    	 }
+    	    
+    	ThreadPoolService.stop();*/
+    	
+       	       
+    	
+    }
+			
+	 
+}
+
+
+
+CloudWatch.java
+
+
+import java.io.IOException;
+import java.io.InputStream;
+
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.auth.PropertiesCredentials;
+import com.amazonaws.services.cloudwatch.AmazonCloudWatchClient;
+
+
+public class CloudWatch {
+	
+public static void EnableClouWathc() {
+	//gets the number of Amazaon instance running and the size of message and cretes 16 amazon instances ata atime when the condiion satisfies. 
+		
+		String key = null;
+		String secret = null;
+		InputStream credentialsAsStream = Thread.currentThread().getContextClassLoader().getResourceAsStream("AwsCredentials.properties");
+		AWSCredentials credentials = null;
+		try {
+			credentials = new PropertiesCredentials(credentialsAsStream);
+			key =(credentials.getAWSAccessKeyId());
+			secret =(credentials.getAWSSecretKey());
+		} catch (IOException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+		
+		
+		AmazonCloudWatchClient cloudWatch = new AmazonCloudWatchClient((AWSCredentials) new BasicAWSCredentials(key, secret));
+		    cloudWatch.setEndpoint("monitoring.eu-west-1.amazonaws.com");
+		    
+		   int sizeOfMessages =  SimpleQueueServiceSample.getNumberOFTasksRunning();
+		   int noAmazonInstances = AmazonInstance.getNumberOfInstances();
+		   
+		   if(sizeOfMessages <= 500  && noAmazonInstances == 1000 && sizeOfMessages != 0)
+			  AmazonInstance.create(16);
+		   else if(sizeOfMessages > 1000 && sizeOfMessages <= 1500 && noAmazonInstances == 16)
+			   AmazonInstance.create(16);
+		   else if(sizeOfMessages > 1000 && sizeOfMessages <= 2000 && noAmazonInstances == 32)
+			   AmazonInstance.create(16);
+
+		  
+		
+	}
+
+public static void main(String args[]){
+	
+	/*
+	 *keeps on polling  cloudwatch after 100 sec  
+	 * */
+	while(true){
+	EnableClouWathc();
+	try {
+		System.out.println("try poling again");
+		Thread.currentThread().sleep(100000);
+	} catch (InterruptedException e) {
+		// TODO Auto-generated catch block
+		e.printStackTrace();
+	}
+	}
+}
+
+}
+
+
+
+ThreadPoolService.java
+
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+
+public class ThreadPoolService {
+	public static Set<Callable<String>> callables = new HashSet<Callable<String>>();
+	public static ExecutorService executorService;
+	//public static ExecutorService executorService = Executors.newCachedThreadPool();
+	public static  Queue resultQueue = new Queue();
+	
+
+	public static void insertTasK(final HashMap<String, Integer> task) {
+
+		//insert a task to the executer service as a runnable task which will execute the sleep method and pushes the reult into result Queue
+		
+		String key = null;
+		Integer value;
+		HashMap<String, Integer> a = new HashMap<String, Integer>();
+		for(Map.Entry<String, Integer> e : task.entrySet()){
+			key = e.getKey();
+			value = e.getValue();
+		}
+		System.out.println("Task submittied "+key);
+		final String data = key;
+		Future f = executorService.submit(new Runnable() {
+			    public void run() {
+			    	try{
+						
+			    		System.out.println(data);
+			    		int time = Integer.parseInt(data.split(" ")[1]);
+			    		System.out.println("thread sleeping for "+time+" ms");
+			    		Thread.sleep(time);
+			    		HashMap<String, Integer> a = new HashMap<String, Integer>();
+			            a.put(data, 0);
+			            
+			    		resultQueue.insert(a);
+			    		
+			    		System.out.println("thread awake");
+			    		}catch(InterruptedException e){
+			    			HashMap<String, Integer> a = new HashMap<String, Integer>();
+			    			a.put(data, 1);
+			    			resultQueue.insert(a);
+			    			e.printStackTrace();
+			    		}
+			    }
+		});
+		try {
+			if(f.get() == null)
+			resultQueue.pushIntoSQS();	
+						
+				resultQueue.display();
+		} catch (InterruptedException e1) {
+			// TODO Auto-generated catch block
+			e1.printStackTrace();
+		} catch (ExecutionException e1) {
+			// TODO Auto-generated catch block
+			e1.printStackTrace();
+		}
+			
+				
+	}
+
+
+
+	public static void stop() {
+		// TODO Auto-generated method stub
+		executorService.shutdown();
+		System.out.println((System.currentTimeMillis() - Scheduler.start)/1000);
+		System.out.println("Executore Stooped");
+		
+	}
+
+
+
+	public static void init(int n) {
+		// TODO Auto-generated method stub
+		executorService = Executors.newFixedThreadPool(n);
+		System.out.println("Executor initiaited");
+	}
+
+
+
+	public static void insertTasKInLW(HashMap<String, Integer> t) {
+		// /insert a task to the executer service as a runnable task which will execute the sleep method and pushes the result into result Queue
+		
+		String key = null;
+		Integer value;
+		HashMap<String, Integer> a = new HashMap<String, Integer>();
+		for(Map.Entry<String, Integer> e : t.entrySet()){
+			key = e.getKey();
+			value = e.getValue();
+		}
+		System.out.println("Task submittied "+key);
+		final String data = key;
+		Future f = executorService.submit(new Runnable() {
+			    public void run() {
+			    	try{
+						
+			    		System.out.println(data);
+			    		int time = Integer.parseInt(data.split(" ")[1]);
+			    		System.out.println("thread sleeping for "+time+" ms");
+			    		Thread.sleep(time);
+			    		HashMap<String, Integer> a = new HashMap<String, Integer>();
+			            a.put(data, 0);
+			            
+			    		resultQueue.insert(a);
+			    		
+			    		System.out.println("thread awake");
+			    		}catch(InterruptedException e){
+			    			HashMap<String, Integer> a = new HashMap<String, Integer>();
+			    			a.put(data, 1);
+			    			resultQueue.insert(a);
+			    			e.printStackTrace();
+			    		}
+			    }
+		});
+				resultQueue.display();
+		
+			
+	}
+}
+
+
+
+
+
